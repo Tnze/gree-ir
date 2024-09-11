@@ -1,9 +1,6 @@
 #![no_std]
 
-use core::{
-    fmt::Debug,
-    iter::{once, repeat},
-};
+use core::{fmt::Debug, hint::unreachable_unchecked, iter::once};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Code {
@@ -25,7 +22,7 @@ impl From<bool> for Code {
     }
 }
 
-impl TryInto<u8> for Code {
+impl TryInto<u8> for &Code {
     type Error = DecodeError;
 
     fn try_into(self) -> Result<u8, Self::Error> {
@@ -37,7 +34,7 @@ impl TryInto<u8> for Code {
     }
 }
 
-impl TryInto<bool> for Code {
+impl TryInto<bool> for &Code {
     type Error = DecodeError;
 
     fn try_into(self) -> Result<bool, Self::Error> {
@@ -50,162 +47,291 @@ impl TryInto<bool> for Code {
 }
 
 #[derive(Clone, Debug)]
-pub struct Controller {
-    pub mode: Mode,
-    pub on: bool,
-    pub fan: Fan,
-    pub swing: bool,
-    pub sleep: bool,
-    pub temperature: Temperature,
-    pub timing: TimerSetting,
-    pub strong: bool,
-    pub light: bool,
-    pub anion: bool, // health?
-    pub dry: bool,   // power saving?
-    pub ventilate: bool,
-
-    pub v_swing: SwingMode,
-    pub h_swing: SwingMode,
-    pub temperature_display: TemperatureDisplay,
-    pub i_feel: bool,
-    pub wifi: bool,
-    pub econo: bool,
+pub struct Message {
+    remote_state: [u8; 8],
 }
 
-impl Controller {
-    pub fn encode(&self) -> impl Iterator<Item = Code> {
-        let code35 = (self.mode.encode())
-            .chain(once(Code::from(self.on)))
-            .chain(self.fan.encode())
-            .chain(once(Code::from(self.swing)))
-            .chain(once(Code::from(self.sleep)))
-            .chain(self.temperature.encode())
-            .chain(self.timing.encode())
-            .chain(once(Code::from(self.strong)))
-            .chain(once(Code::from(self.light)))
-            .chain(once(Code::from(self.anion)))
-            .chain(once(Code::from(self.dry)))
-            .chain(once(Code::from(self.ventilate)))
-            .chain(MAGIC_1.into_iter())
-            .chain(MAGIC_3.into_iter());
-        let code32 = (self.v_swing.encode())
-            .chain(self.h_swing.encode())
-            .chain(self.temperature_display.encode())
-            .chain(once(Code::from(self.i_feel)))
-            .chain(MAGIC_4.into_iter())
-            .chain(once(Code::from(self.wifi)))
-            .chain(repeat(Code::Short).take(11))
-            .chain(once(Code::from(self.econo)))
-            .chain(once(Code::Short))
-            .chain({
-                let checksum = self.checksum();
-                (0..4).map(move |i| Code::from(checksum >> i & 0x1 != 0))
-            });
+impl Message {
+    pub fn new() -> Self {
+        Self {
+            remote_state: [0, 0, 0, 0b01010000, 0, 0b00100000, 0, 0],
+        }
+    }
+
+    pub fn encode(&self) -> impl Iterator<Item = Code> + use<'_> {
+        let checksum = self.checksum();
+        let byte_to_codes = |x| (0..8).map(move |i| Code::from(x >> i & 1u8 != 0u8));
+        let code1 = self.remote_state[..4].iter().flat_map(byte_to_codes);
+        let code2 = self.remote_state[4..].iter().flat_map(byte_to_codes);
         once(Code::Start)
-            .chain(code35)
-            .chain(once(Code::Continue))
-            .chain(code32)
-            .chain(once(Code::End))
+            .chain(code1)
+            .chain(MAGIC_3.into_iter())
+            .chain(code2.take(4 * 8 - 4))
+            .chain((0..4).map(move |i| Code::from(checksum >> i & 1u8 != 0u8)))
     }
 
     pub fn decode(codes: &[Code; 70]) -> Result<Self, DecodeError> {
-        let (Code::Start, Code::Continue, Code::End) = (codes[0], codes[36], codes[69]) else {
-            return Err(DecodeError::InvalidMarker);
+        let mut message = Self {
+            remote_state: [0; 8],
         };
-        let mut iter = codes.iter().copied();
+        let mut iter = codes.iter();
+        // Start
         let Code::Start = iter.next().ok_or(DecodeError::Eof)? else {
             return Err(DecodeError::InvalidMarker);
         };
-        let mode = Mode::decode(&mut iter)?;
-        let on: bool = iter.next().ok_or(DecodeError::Eof)?.try_into()?;
-        let fan = Fan::decode(&mut iter)?;
-        let swing: bool = iter.next().ok_or(DecodeError::Eof)?.try_into()?;
-        let sleep: bool = iter.next().ok_or(DecodeError::Eof)?.try_into()?;
-        let temperature = Temperature::decode(&mut iter)?;
-        let timing = TimerSetting::decode(&mut iter)?;
-        let humidification: bool = iter.next().ok_or(DecodeError::Eof)?.try_into()?;
-        let light: bool = iter.next().ok_or(DecodeError::Eof)?.try_into()?;
-        let anion: bool = iter.next().ok_or(DecodeError::Eof)?.try_into()?;
-        let dry: bool = iter.next().ok_or(DecodeError::Eof)?.try_into()?;
-        let ventilate: bool = iter.next().ok_or(DecodeError::Eof)?.try_into()?;
-        check_magic_code1(&mut iter)?;
-        check_magic_code2(&mut iter)?;
+        // Code 1
+        for v in message.remote_state[..4].iter_mut() {
+            for i in 0..8 {
+                let t: &Code = iter.next().ok_or(DecodeError::Eof)?;
+                *v |= TryInto::<u8>::try_into(t)? << i;
+            }
+        }
+        check_magic_code3(&mut iter)?;
+        // Continue
         let Code::Continue = iter.next().ok_or(DecodeError::Eof)? else {
             return Err(DecodeError::InvalidMarker);
         };
-
-        let v_swing = SwingMode::decode(&mut iter)?;
-        let h_swing = SwingMode::decode(&mut iter)?;
-        let temperature_display = TemperatureDisplay::decode(&mut iter)?;
-        let i_feel = iter.next().ok_or(DecodeError::Eof)?.try_into()?;
-        check_magic_code3(&mut iter)?;
-        let wifi = iter.next().ok_or(DecodeError::Eof)?.try_into()?;
-
-        let power_save: bool = iter.nth(11).ok_or(DecodeError::Eof)?.try_into()?;
-        _ = iter.next().ok_or(DecodeError::Eof)?;
-
-        let value = Self {
-            mode,
-            on,
-            fan,
-            swing,
-            sleep,
-            temperature,
-            timing,
-            strong: humidification,
-            light,
-            anion,
-            dry,
-            ventilate,
-            v_swing,
-            h_swing,
-            temperature_display,
-            i_feel,
-            wifi,
-            econo: power_save,
-        };
-
-        let mut checksum = 0_u8;
-        for i in 0..4 {
-            let t: u8 = iter.next().ok_or(DecodeError::Eof)?.try_into()?;
-            checksum |= t << i;
+        // Code 2
+        for v in message.remote_state[4..].iter_mut() {
+            for i in 0..8 {
+                let t: &Code = iter.next().ok_or(DecodeError::Eof)?;
+                *v |= TryInto::<u8>::try_into(t)? << i;
+            }
         }
-        let checksum_calc = value.checksum();
-        if checksum != checksum_calc {
-            return Err(DecodeError::Checksum(checksum << 4 | checksum_calc));
-        }
+        // End
         let Code::End = iter.next().ok_or(DecodeError::Eof)? else {
             return Err(DecodeError::InvalidMarker);
         };
-
-        Ok(value)
+        // Checksum
+        if message.checksum() != message.remote_state[7] >> 4 {
+            return Err(DecodeError::Checksum);
+        }
+        Ok(message)
     }
 
     fn checksum(&self) -> u8 {
-        let blocks = [
-            self.mode as u8 | (self.on as u8) << 3,
-            self.temperature.0 - 16,
-            0x0, // timing
-            self.ventilate as u8 | 0b01010000,
-            self.v_swing as u8 | (self.h_swing as u8) << 4,
-            self.temperature_display as u8 | (self.i_feel as u8) << 2 | 0b100 << 3,
-            0x00,
-        ];
-        Self::checksum_block(&blocks[..])
-    }
-
-    fn checksum_block(data: &[u8]) -> u8 {
         let mut sum = 10;
         // Sum the lower half of the first 4 bytes of this block.
-        for v in data.iter().take(4) {
+        for v in self.remote_state.iter().take(4) {
             sum += *v & 0xF;
         }
         // then sum the upper half of the next 3 bytes.
-        for v in data.iter().skip(4).take(3) {
+        for v in self.remote_state[4..].iter().take(3) {
             sum += *v >> 4;
         }
         // Trim it down to fit into the 4 bits allowed. i.e. Mod 16.
         sum & 0xF
+    }
+
+    pub fn mode(&self) -> Result<Mode, DecodeError> {
+        match self.remote_state[0] & 0b111 {
+            0 => Ok(Mode::Auto),
+            1 => Ok(Mode::Cold),
+            2 => Ok(Mode::Dry),
+            3 => Ok(Mode::Wind),
+            4 => Ok(Mode::Hot),
+            _ => Err(DecodeError::InvalidMode),
+        }
+    }
+
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.remote_state[0] = self.remote_state[0] & 0b1111_1000 | mode as u8;
+    }
+
+    pub fn is_on(&self) -> bool {
+        self.remote_state[0] >> 3 & 1 != 0
+    }
+
+    pub fn set_on(&mut self, on: bool) {
+        self.remote_state[0] = self.remote_state[0] & 0b1111_0111 | (on as u8) << 3;
+    }
+
+    pub fn fan(&self) -> Fan {
+        match self.remote_state[0] >> 4 & 0b11 {
+            0 => Fan::Auto,
+            1 => Fan::Level1,
+            2 => Fan::Level2,
+            3 => Fan::Level3,
+            _ => unsafe { unreachable_unchecked() },
+        }
+    }
+
+    pub fn set_fan(&mut self, fan: Fan) {
+        self.remote_state[0] = self.remote_state[0] & 0b1100_1111 | (fan as u8) << 4;
+    }
+
+    pub fn swing(&self) -> bool {
+        self.remote_state[0] >> 6 & 1 != 0
+    }
+
+    pub fn set_swing(&mut self, swing: bool) {
+        self.remote_state[0] = self.remote_state[0] & 0b1011_1111 | (swing as u8) << 6;
+    }
+
+    pub fn sleep(&self) -> bool {
+        self.remote_state[0] >> 7 & 1 != 0
+    }
+
+    pub fn set_sleep(&mut self, sleep: bool) {
+        self.remote_state[0] = self.remote_state[0] & 0b0111_1111 | (sleep as u8) << 7;
+    }
+
+    pub fn temperature(&self) -> Result<Temperature, DecodeError> {
+        // TODO: support fahrenheit
+        let value = self.remote_state[1] & 0x0F;
+        if value <= 30 - 16 {
+            Ok(Temperature::Centigrade(value + 16))
+        } else {
+            Err(DecodeError::InvalidTemperature)
+        }
+    }
+
+    pub fn set_temperature(&mut self, temp: Temperature) {
+        let value = match temp {
+            Temperature::Centigrade(degree) if degree >= 16 && degree <= 30 => degree - 16,
+            _ => 25 - 16,
+        };
+        self.remote_state[1] = self.remote_state[1] & 0xF0 | value;
+    }
+
+    pub fn timer(&self) -> Result<TimerSetting, DecodeError> {
+        TimerSetting::try_from(self.remote_state[1] >> 4 | self.remote_state[2] << 4)
+    }
+
+    pub fn set_timer(&mut self, setting: &TimerSetting) {
+        let value: u8 = setting.into();
+        self.remote_state[1] = self.remote_state[1] & 0x0F | value << 4;
+        self.remote_state[2] = self.remote_state[2] & 0xF0 | value & 0x0F;
+    }
+
+    pub fn turbo(&self) -> bool {
+        self.remote_state[2] >> 4 & 1 != 0
+    }
+
+    pub fn set_turbo(&mut self, turbo: bool) {
+        self.remote_state[2] = self.remote_state[2] & 0b1110_1111 | (turbo as u8) << 4;
+    }
+
+    pub fn light(&self) -> bool {
+        self.remote_state[2] >> 5 & 1 != 0
+    }
+
+    pub fn set_light(&mut self, light: bool) {
+        self.remote_state[2] = self.remote_state[2] & 0b1101_1111 | (light as u8) << 5;
+    }
+
+    pub fn health(&self) -> bool {
+        self.remote_state[2] >> 6 & 1 != 0
+    }
+
+    pub fn set_health(&mut self, health: bool) {
+        self.remote_state[2] = self.remote_state[2] & 0b1011_1111 | (health as u8) << 6;
+    }
+
+    pub fn dry(&self) -> bool {
+        self.remote_state[2] >> 7 & 1 != 0
+    }
+
+    pub fn set_dry(&mut self, dry: bool) {
+        self.remote_state[2] = self.remote_state[2] & 0b0111_1111 | (dry as u8) << 7;
+    }
+
+    pub fn ventilate(&self) -> bool {
+        self.remote_state[3] & 1 != 0
+    }
+
+    pub fn set_ventilateo(&mut self, ventilate: bool) {
+        self.remote_state[3] = self.remote_state[3] & 0b1111_1110 | ventilate as u8;
+    }
+
+    pub fn v_swing(&self) -> SwingMode {
+        match self.remote_state[4] & 0xF {
+            0 => SwingMode::Off,
+            1 => SwingMode::On,
+            2 => SwingMode::Unknown2,
+            3 => SwingMode::Unknown3,
+            4 => SwingMode::Unknown4,
+            5 => SwingMode::Unknown5,
+            6 => SwingMode::Unknown6,
+            7 => SwingMode::Unknown7,
+            8 => SwingMode::Unknown8,
+            9 => SwingMode::Unknown9,
+            10 => SwingMode::Unknown10,
+            11 => SwingMode::Unknown11,
+            12 => SwingMode::Unknown12,
+            13 => SwingMode::Unknown13,
+            14 => SwingMode::Unknown14,
+            15 => SwingMode::Unknown15,
+            _ => unsafe { unreachable_unchecked() },
+        }
+    }
+
+    pub fn set_v_swing(&mut self, mode: SwingMode) {
+        self.remote_state[4] = self.remote_state[4] & 0xF0 | mode as u8;
+    }
+
+    pub fn h_swing(&self) -> SwingMode {
+        match self.remote_state[4] >> 4 {
+            0 => SwingMode::Off,
+            1 => SwingMode::On,
+            2 => SwingMode::Unknown2,
+            3 => SwingMode::Unknown3,
+            4 => SwingMode::Unknown4,
+            5 => SwingMode::Unknown5,
+            6 => SwingMode::Unknown6,
+            7 => SwingMode::Unknown7,
+            8 => SwingMode::Unknown8,
+            9 => SwingMode::Unknown9,
+            10 => SwingMode::Unknown10,
+            11 => SwingMode::Unknown11,
+            12 => SwingMode::Unknown12,
+            13 => SwingMode::Unknown13,
+            14 => SwingMode::Unknown14,
+            15 => SwingMode::Unknown15,
+            _ => unsafe { unreachable_unchecked() },
+        }
+    }
+
+    pub fn set_h_swing(&mut self, mode: SwingMode) {
+        self.remote_state[4] = self.remote_state[4] & 0x0F | (mode as u8) << 4;
+    }
+
+    pub fn temperature_display(&self) -> TemperatureDisplay {
+        match self.remote_state[5] & 0b11 {
+            0 => TemperatureDisplay::Setting,
+            1 => TemperatureDisplay::Room,
+            2 => TemperatureDisplay::Indoor,
+            3 => TemperatureDisplay::Outdoor,
+            _ => unsafe { unreachable_unchecked() },
+        }
+    }
+
+    pub fn set_temperature_display(&mut self, temp_display: TemperatureDisplay) {
+        self.remote_state[5] = self.remote_state[5] & 0b1111_1100 | temp_display as u8;
+    }
+
+    pub fn i_feel(&self) -> bool {
+        self.remote_state[5] >> 2 & 1 != 0
+    }
+
+    pub fn set_i_feel(&mut self, i_feel: bool) {
+        self.remote_state[5] = self.remote_state[5] & 0b1111_1011 | (i_feel as u8) << 2;
+    }
+
+    pub fn wifi(&self) -> bool {
+        self.remote_state[5] >> 6 & 1 != 0
+    }
+
+    pub fn set_wifi(&mut self, wifi: bool) {
+        self.remote_state[5] = self.remote_state[5] & 0b1011_1111 | (wifi as u8) << 6;
+    }
+
+    pub fn econo(&self) -> bool {
+        self.remote_state[7] >> 2 & 1 != 0
+    }
+
+    pub fn set_econo(&mut self, econo: bool) {
+        self.remote_state[7] = self.remote_state[7] & 0b1111_1011 | (econo as u8) << 2;
     }
 }
 
@@ -218,9 +344,9 @@ pub enum DecodeError {
     InvalidFan,
     InvalidTemperature,
     InvalidSwingMode,
-    InvalidMagic(u8),
+    InvalidMagic,
     Eof,
-    Checksum(u8),
+    Checksum,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -232,30 +358,6 @@ pub enum Mode {
     Hot,
 }
 
-impl Mode {
-    fn encode(&self) -> impl Iterator<Item = Code> {
-        let a = *self as u8;
-        [a >> 0, a >> 1, a >> 2]
-            .into_iter()
-            .map(|x| x & 0x1 != 0)
-            .map(Code::from)
-    }
-
-    fn decode(codes: &mut impl Iterator<Item = Code>) -> Result<Self, DecodeError> {
-        let a: u8 = codes.next().ok_or(DecodeError::Eof)?.try_into()?;
-        let b: u8 = codes.next().ok_or(DecodeError::Eof)?.try_into()?;
-        let c: u8 = codes.next().ok_or(DecodeError::Eof)?.try_into()?;
-        match a << 0 | b << 1 | c << 2 {
-            0 => Ok(Mode::Auto),
-            1 => Ok(Mode::Cold),
-            2 => Ok(Mode::Dry),
-            3 => Ok(Mode::Wind),
-            4 => Ok(Mode::Hot),
-            _ => Err(DecodeError::InvalidMode),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub enum Fan {
     Auto,
@@ -264,66 +366,16 @@ pub enum Fan {
     Level3,
 }
 
-impl Fan {
-    fn encode(&self) -> impl Iterator<Item = Code> {
-        let a = *self as u8;
-        [a >> 0, a >> 1]
-            .into_iter()
-            .map(|x| x & 0x1 != 0)
-            .map(Code::from)
-    }
-
-    fn decode(codes: &mut impl Iterator<Item = Code>) -> Result<Self, DecodeError> {
-        let a: u8 = codes.next().ok_or(DecodeError::Eof)?.try_into()?;
-        let b: u8 = codes.next().ok_or(DecodeError::Eof)?.try_into()?;
-        match a << 0 | b << 1 {
-            0 => Ok(Fan::Auto),
-            1 => Ok(Fan::Level1),
-            2 => Ok(Fan::Level2),
-            3 => Ok(Fan::Level3),
-            _ => Err(DecodeError::InvalidFan),
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
-pub struct Temperature(u8);
-
-impl Temperature {
-    pub fn from_centigrade(degrees: u8) -> Option<Self> {
-        if degrees < 16 || degrees > 30 {
-            None
-        } else {
-            Some(Self(degrees))
-        }
-    }
-
-    fn encode(&self) -> impl Iterator<Item = Code> {
-        let a = self.0 - 16;
-        [a >> 0, a >> 1, a >> 2, a >> 3]
-            .into_iter()
-            .map(|x| x & 0x1 != 0)
-            .map(Code::from)
-    }
-
-    fn decode(codes: &mut impl Iterator<Item = Code>) -> Result<Self, DecodeError> {
-        let mut a = 0;
-        for i in 0..4 {
-            let code = codes.next().ok_or(DecodeError::Eof)?;
-            let t: u8 = code.try_into()?;
-            a |= t << i;
-        }
-        if a > 30 - 16 {
-            Err(DecodeError::InvalidTemperature)
-        } else {
-            Ok(Self(a + 16))
-        }
-    }
+pub enum Temperature {
+    Centigrade(u8),
 }
 
 impl Debug for Temperature {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_fmt(format_args!("{} ℃", self.0))
+        match self {
+            Temperature::Centigrade(degree) => f.write_fmt(format_args!("{} ℃", degree)),
+        }
     }
 }
 
@@ -331,22 +383,6 @@ impl Debug for Temperature {
 pub struct TimerSetting {
     pub enabled: bool,
     pub half_hours: u8,
-}
-
-impl TimerSetting {
-    fn encode(&self) -> impl Iterator<Item = Code> {
-        let a: u8 = self.into();
-        (0..8).map(move |i| Code::from(a >> i & 1 != 0))
-    }
-
-    fn decode(codes: &mut impl Iterator<Item = Code>) -> Result<Self, DecodeError> {
-        let mut a = 0u8;
-        for i in 0..8 {
-            let t: u8 = codes.next().ok_or(DecodeError::Eof)?.try_into()?;
-            a |= t << i;
-        }
-        Self::try_from(a)
-    }
 }
 
 impl TryFrom<u8> for TimerSetting {
@@ -398,39 +434,6 @@ pub enum SwingMode {
     Unknown15,
 }
 
-impl SwingMode {
-    fn encode(&self) -> impl Iterator<Item = Code> {
-        let a: u8 = *self as u8;
-        (0..4).map(move |i| Code::from(a >> i & 1 != 0))
-    }
-
-    fn decode(codes: &mut impl Iterator<Item = Code>) -> Result<Self, DecodeError> {
-        let mut a = 0u8;
-        for i in 0..4 {
-            let t: u8 = codes.next().ok_or(DecodeError::Eof)?.try_into()?;
-            a |= t << i;
-        }
-        match a {
-            1 => Ok(Self::On),
-            2 => Ok(Self::Unknown2),
-            3 => Ok(Self::Unknown3),
-            4 => Ok(Self::Unknown4),
-            5 => Ok(Self::Unknown5),
-            6 => Ok(Self::Unknown6),
-            7 => Ok(Self::Unknown7),
-            8 => Ok(Self::Unknown8),
-            9 => Ok(Self::Unknown9),
-            10 => Ok(Self::Unknown10),
-            11 => Ok(Self::Unknown11),
-            12 => Ok(Self::Unknown12),
-            13 => Ok(Self::Unknown13),
-            14 => Ok(Self::Unknown14),
-            15 => Ok(Self::Unknown15),
-            _ => Ok(Self::Off),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub enum TemperatureDisplay {
     Setting,
@@ -439,74 +442,15 @@ pub enum TemperatureDisplay {
     Outdoor,
 }
 
-impl TemperatureDisplay {
-    fn encode(&self) -> impl Iterator<Item = Code> {
-        let a: u8 = *self as u8;
-        (0..2).map(move |i| Code::from(a >> i & 1 != 0))
-    }
-
-    fn decode(codes: &mut impl Iterator<Item = Code>) -> Result<Self, DecodeError> {
-        let a: bool = codes.next().ok_or(DecodeError::Eof)?.try_into()?;
-        let b: bool = codes.next().ok_or(DecodeError::Eof)?.try_into()?;
-        match (a, b) {
-            (false, false) => Ok(Self::Setting),
-            (true, false) => Ok(Self::Room),
-            (false, true) => Ok(Self::Indoor),
-            (true, true) => Ok(Self::Outdoor),
-        }
-    }
-}
-
-const MAGIC_1: [Code; 7] = [
-    Code::Short,
-    Code::Short,
-    Code::Short,
-    Code::Long,
-    Code::Short,
-    Code::Long,
-    Code::Short,
-];
-const MAGIC_2: [Code; 7] = [
-    Code::Short,
-    Code::Short,
-    Code::Short,
-    Code::Long,
-    Code::Long,
-    Code::Long,
-    Code::Short,
-];
 const MAGIC_3: [Code; 3] = [Code::Short, Code::Long, Code::Short];
-const MAGIC_4: [Code; 3] = [Code::Short, Code::Short, Code::Long];
 
-fn check_magic_code1(iter: &mut impl Iterator<Item = Code>) -> Result<(), DecodeError> {
-    let mut codes = [Code::Short; 7];
-    for v in codes.iter_mut() {
-        *v = iter.next().ok_or(DecodeError::Eof)?;
-    }
-    match codes {
-        MAGIC_1 | MAGIC_2 => Ok(()),
-        _ => Err(DecodeError::InvalidMagic(1)),
-    }
-}
-
-fn check_magic_code2(iter: &mut impl Iterator<Item = Code>) -> Result<(), DecodeError> {
+fn check_magic_code3<'a>(iter: &mut impl Iterator<Item = &'a Code>) -> Result<(), DecodeError> {
     let mut codes = [Code::Short; 3];
     for v in codes.iter_mut() {
-        *v = iter.next().ok_or(DecodeError::Eof)?;
+        *v = *iter.next().ok_or(DecodeError::Eof)?;
     }
     match codes {
         MAGIC_3 => Ok(()),
-        _ => Err(DecodeError::InvalidMagic(2)),
-    }
-}
-
-fn check_magic_code3(iter: &mut impl Iterator<Item = Code>) -> Result<(), DecodeError> {
-    let mut codes = [Code::Short; 3];
-    for v in codes.iter_mut() {
-        *v = iter.next().ok_or(DecodeError::Eof)?;
-    }
-    match codes {
-        MAGIC_4 => Ok(()),
-        _ => Err(DecodeError::InvalidMagic(3)),
+        _ => Err(DecodeError::InvalidMagic),
     }
 }
