@@ -66,8 +66,10 @@ impl Message {
         once(Code::Start)
             .chain(code1)
             .chain(MAGIC_3.into_iter())
+            .chain(once(Code::Continue))
             .chain(code2.take(4 * 8 - 4))
             .chain((0..4).map(move |i| Code::from(checksum >> i & 1u8 != 0u8)))
+            .chain(once(Code::End))
     }
 
     pub fn decode(codes: &[Code; 70]) -> Result<Self, DecodeError> {
