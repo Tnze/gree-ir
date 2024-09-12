@@ -58,7 +58,7 @@ impl Message {
         }
     }
 
-    pub fn encode(&self) -> impl Iterator<Item = Code> + use<'_> {
+    pub fn encode(&self) -> impl Iterator<Item = Code> + '_ {
         let checksum = self.checksum();
         let byte_to_codes = |x| (0..8).map(move |i| Code::from(x >> i & 1u8 != 0u8));
         let code1 = self.remote_state[..4].iter().flat_map(byte_to_codes);
