@@ -46,7 +46,7 @@ impl TryInto<bool> for &Code {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Message {
     remote_state: [u8; 8],
 }
@@ -73,9 +73,7 @@ impl Message {
     }
 
     pub fn decode(codes: &[Code; 70]) -> Result<Self, DecodeError> {
-        let mut message = Self {
-            remote_state: [0; 8],
-        };
+        let mut message = Self::new();
         let mut iter = codes.iter();
         // Start
         let Code::Start = iter.next().ok_or(DecodeError::Eof)? else {
@@ -334,6 +332,31 @@ impl Message {
 
     pub fn set_econo(&mut self, econo: bool) {
         self.remote_state[7] = self.remote_state[7] & 0b1111_1011 | (econo as u8) << 2;
+    }
+}
+
+impl Debug for Message {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Message")
+            .field("mode", &self.mode())
+            .field("on", &self.is_on())
+            .field("fan", &self.fan())
+            .field("swing", &self.swing())
+            .field("sleep", &self.sleep())
+            .field("temperature", &self.temperature())
+            .field("timer", &self.timer())
+            .field("turbo", &self.turbo())
+            .field("light", &self.light())
+            .field("health", &self.health())
+            .field("dry", &self.dry())
+            .field("ventilate", &self.ventilate())
+            .field("v_swing", &self.v_swing())
+            .field("h_swing", &self.h_swing())
+            .field("temperature_display", &self.temperature_display())
+            .field("i_feel", &self.i_feel())
+            .field("wifi", &self.wifi())
+            .field("econo", &self.econo())
+            .finish()
     }
 }
 

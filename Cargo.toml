@@ -1,7 +1,10 @@
 [package]
 name = "gree-ir"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["Tnze <cjd001113@outlook.com>"]
 license = "MIT"
 description = "IR encoding/decoding for Gree AC"
+repository = "https://github.com/Tnze/gree-ir"
+keywords = ["Gree", "IR", "NEC", "air-conditioning", "remote-control"]
+categories = ["no-std::no-alloc", "encoding", "embedded", "parsing"]
