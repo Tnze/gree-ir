@@ -53,13 +53,18 @@ pub struct Message {
 
 impl Message {
     pub fn new() -> Self {
-        Self {
+        let mut msg = Self {
             remote_state: [0, 0, 0, 0b01010000, 0, 0b00100000, 0, 0],
-        }
+        };
+        msg.update_checksum();
+        msg
+    }
+
+    pub fn raw(&self) -> &[u8; 8] {
+        &self.remote_state
     }
 
     pub fn encode(&self) -> impl Iterator<Item = Code> + '_ {
-        let checksum = self.checksum();
         let byte_to_codes = |x| (0..8).map(move |i| Code::from(x >> i & 1u8 != 0u8));
         let code1 = self.remote_state[..4].iter().flat_map(byte_to_codes);
         let code2 = self.remote_state[4..].iter().flat_map(byte_to_codes);
@@ -67,8 +72,7 @@ impl Message {
             .chain(code1)
             .chain(MAGIC_3.into_iter())
             .chain(once(Code::Continue))
-            .chain(code2.take(4 * 8 - 4))
-            .chain((0..4).map(move |i| Code::from(checksum >> i & 1u8 != 0u8)))
+            .chain(code2)
             .chain(once(Code::End))
     }
 
@@ -123,6 +127,11 @@ impl Message {
         sum & 0xF
     }
 
+    fn update_checksum(&mut self) {
+        self.remote_state[3] &= 0x0F;
+        self.remote_state[3] |= self.checksum() << 4;
+    }
+
     pub fn mode(&self) -> Result<Mode, DecodeError> {
         match self.remote_state[0] & 0b111 {
             0 => Ok(Mode::Auto),
@@ -136,6 +145,7 @@ impl Message {
 
     pub fn set_mode(&mut self, mode: Mode) {
         self.remote_state[0] = self.remote_state[0] & 0b1111_1000 | mode as u8;
+        self.update_checksum();
     }
 
     pub fn is_on(&self) -> bool {
@@ -144,6 +154,7 @@ impl Message {
 
     pub fn set_on(&mut self, on: bool) {
         self.remote_state[0] = self.remote_state[0] & 0b1111_0111 | (on as u8) << 3;
+        self.update_checksum();
     }
 
     pub fn fan(&self) -> Fan {
@@ -158,6 +169,7 @@ impl Message {
 
     pub fn set_fan(&mut self, fan: Fan) {
         self.remote_state[0] = self.remote_state[0] & 0b1100_1111 | (fan as u8) << 4;
+        self.update_checksum();
     }
 
     pub fn swing(&self) -> bool {
@@ -166,6 +178,7 @@ impl Message {
 
     pub fn set_swing(&mut self, swing: bool) {
         self.remote_state[0] = self.remote_state[0] & 0b1011_1111 | (swing as u8) << 6;
+        self.update_checksum();
     }
 
     pub fn sleep(&self) -> bool {
@@ -174,6 +187,7 @@ impl Message {
 
     pub fn set_sleep(&mut self, sleep: bool) {
         self.remote_state[0] = self.remote_state[0] & 0b0111_1111 | (sleep as u8) << 7;
+        self.update_checksum();
     }
 
     pub fn temperature(&self) -> Result<Temperature, DecodeError> {
@@ -192,6 +206,7 @@ impl Message {
             _ => 25 - 16,
         };
         self.remote_state[1] = self.remote_state[1] & 0xF0 | value;
+        self.update_checksum();
     }
 
     pub fn timer(&self) -> Result<TimerSetting, DecodeError> {
@@ -202,6 +217,7 @@ impl Message {
         let value: u8 = setting.into();
         self.remote_state[1] = self.remote_state[1] & 0x0F | value << 4;
         self.remote_state[2] = self.remote_state[2] & 0xF0 | value & 0x0F;
+        self.update_checksum();
     }
 
     pub fn turbo(&self) -> bool {
@@ -210,6 +226,7 @@ impl Message {
 
     pub fn set_turbo(&mut self, turbo: bool) {
         self.remote_state[2] = self.remote_state[2] & 0b1110_1111 | (turbo as u8) << 4;
+        self.update_checksum();
     }
 
     pub fn light(&self) -> bool {
@@ -218,6 +235,7 @@ impl Message {
 
     pub fn set_light(&mut self, light: bool) {
         self.remote_state[2] = self.remote_state[2] & 0b1101_1111 | (light as u8) << 5;
+        self.update_checksum();
     }
 
     pub fn health(&self) -> bool {
@@ -226,6 +244,7 @@ impl Message {
 
     pub fn set_health(&mut self, health: bool) {
         self.remote_state[2] = self.remote_state[2] & 0b1011_1111 | (health as u8) << 6;
+        self.update_checksum();
     }
 
     pub fn dry(&self) -> bool {
@@ -234,6 +253,7 @@ impl Message {
 
     pub fn set_dry(&mut self, dry: bool) {
         self.remote_state[2] = self.remote_state[2] & 0b0111_1111 | (dry as u8) << 7;
+        self.update_checksum();
     }
 
     pub fn ventilate(&self) -> bool {
@@ -242,6 +262,7 @@ impl Message {
 
     pub fn set_ventilateo(&mut self, ventilate: bool) {
         self.remote_state[3] = self.remote_state[3] & 0b1111_1110 | ventilate as u8;
+        self.update_checksum();
     }
 
     pub fn v_swing(&self) -> SwingMode {
@@ -268,6 +289,7 @@ impl Message {
 
     pub fn set_v_swing(&mut self, mode: SwingMode) {
         self.remote_state[4] = self.remote_state[4] & 0xF0 | mode as u8;
+        self.update_checksum();
     }
 
     pub fn h_swing(&self) -> SwingMode {
@@ -294,6 +316,7 @@ impl Message {
 
     pub fn set_h_swing(&mut self, mode: SwingMode) {
         self.remote_state[4] = self.remote_state[4] & 0x0F | (mode as u8) << 4;
+        self.update_checksum();
     }
 
     pub fn temperature_display(&self) -> TemperatureDisplay {
@@ -308,6 +331,7 @@ impl Message {
 
     pub fn set_temperature_display(&mut self, temp_display: TemperatureDisplay) {
         self.remote_state[5] = self.remote_state[5] & 0b1111_1100 | temp_display as u8;
+        self.update_checksum();
     }
 
     pub fn i_feel(&self) -> bool {
@@ -316,6 +340,7 @@ impl Message {
 
     pub fn set_i_feel(&mut self, i_feel: bool) {
         self.remote_state[5] = self.remote_state[5] & 0b1111_1011 | (i_feel as u8) << 2;
+        self.update_checksum();
     }
 
     pub fn wifi(&self) -> bool {
@@ -324,6 +349,7 @@ impl Message {
 
     pub fn set_wifi(&mut self, wifi: bool) {
         self.remote_state[5] = self.remote_state[5] & 0b1011_1111 | (wifi as u8) << 6;
+        self.update_checksum();
     }
 
     pub fn econo(&self) -> bool {
@@ -332,6 +358,7 @@ impl Message {
 
     pub fn set_econo(&mut self, econo: bool) {
         self.remote_state[7] = self.remote_state[7] & 0b1111_1011 | (econo as u8) << 2;
+        self.update_checksum();
     }
 }
 
