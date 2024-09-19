@@ -128,8 +128,8 @@ impl Message {
     }
 
     fn update_checksum(&mut self) {
-        self.remote_state[3] &= 0x0F;
-        self.remote_state[3] |= self.checksum() << 4;
+        self.remote_state[7] &= 0x0F;
+        self.remote_state[7] |= self.checksum() << 4;
     }
 
     pub fn mode(&self) -> Result<Mode, DecodeError> {
