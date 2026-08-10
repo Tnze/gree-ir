@@ -60,6 +60,12 @@ impl Message {
         msg
     }
 
+    fn empty() -> Self {
+        Self {
+            remote_state: [0; 8],
+        }
+    }
+
     pub fn raw(&self) -> &[u8; 8] {
         &self.remote_state
     }
@@ -77,7 +83,7 @@ impl Message {
     }
 
     pub fn decode(codes: &[Code; 70]) -> Result<Self, DecodeError> {
-        let mut message = Self::new();
+        let mut message = Self::empty();
         let mut iter = codes.iter();
         // Start
         let Code::Start = iter.next().ok_or(DecodeError::Eof)? else {
